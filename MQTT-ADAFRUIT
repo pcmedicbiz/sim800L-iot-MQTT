@@ -1,0 +1,207 @@
+
+// Your GPRS credentials (leave empty, if missing)
+const char apn[]      = "everywhere"; // Your APN
+const char user[] = "eesecure"; // User
+const char pass[] = "secure"; // Password
+
+#define TINY_GSM_MODEM_SIM800      // Modem is SIM800
+#define TINY_GSM_RX_BUFFER   1024  // Set RX buffer to 1Kb
+
+// TTGO T-Call pin definitions
+#define MODEM_RST            5
+#define MODEM_PWKEY          4
+#define MODEM_POWER_ON       23
+#define MODEM_TX             27
+#define MODEM_RX             26
+#define I2C_SDA              21
+#define I2C_SCL              22
+
+#include <TinyGsmClient.h>
+
+#include <PubSubClient.h>
+#include <Wire.h>
+#include "utilities.h"
+
+
+// Set serial for debug console (to the Serial Monitor, default speed 115200)
+#define SerialMon Serial
+
+// Set serial for AT commands (to the module)
+#define SerialAT  Serial1
+
+
+// MQTT details
+const char* broker = "io.adafruit.com";
+#define CLIENT_ID "gsmArduino"
+
+// visit io.adafruit.com if you need to create an account,
+// or if you need your Adafruit IO key.
+#define ADAFRUIT_USERNAME    "USERNAME"
+#define AIO_KEY             "YOUR_KEY
+
+// Adafruit IO Feeds
+#define SUBSCRIBE_FEED_PATH ADAFRUIT_USERNAME "/feeds/test"
+#define PUBLISH_FEED_PATH ADAFRUIT_USERNAME "/feeds/testx"
+
+
+TinyGsm modem(SerialAT);
+
+TinyGsmClient client(modem);
+PubSubClient mqtt(client);
+const int  port = 80;
+
+#define LED_PIN 33
+int ledStatus = LOW;
+
+long lastReconnectAttempt = 0;
+
+// Where the magic happens
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+
+  SerialMon.print("Message arrived [");
+  SerialMon.print(topic);
+  SerialMon.print("]: ");
+  SerialMon.write(payload, length);
+  SerialMon.println();
+
+  if (String(topic) == SUBSCRIBE_FEED_PATH) {
+    ledStatus = !ledStatus;
+    digitalWrite(LED_PIN, ledStatus);
+    mqtt.publish(PUBLISH_FEED_PATH, ledStatus ? "1" : "0");
+    //mqtt.publish(PUBLISH_FEED_PATH, " TEST DATA");
+  }
+
+}
+
+void setup() {
+  // Set pin mode for the LED output
+  pinMode(LED_PIN, OUTPUT);
+
+  // Set console baud rate
+  SerialMon.begin(115200);
+  delay(10);
+  
+  // Keep power when running from battery
+  Wire.begin(I2C_SDA, I2C_SCL);
+  bool   isOk = setPowerBoostKeepOn(1);
+  SerialMon.println(String("IP5306 KeepOn ") + (isOk ? "OK" : "FAIL"));
+
+  // Set-up modem reset, enable, power pins
+  pinMode(MODEM_PWKEY, OUTPUT);
+  pinMode(MODEM_RST, OUTPUT);
+  pinMode(MODEM_POWER_ON, OUTPUT);
+
+  digitalWrite(MODEM_PWKEY, LOW);
+  digitalWrite(MODEM_RST, HIGH);
+  digitalWrite(MODEM_POWER_ON, HIGH);
+
+// Set GSM module baud rate and UART pins
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  delay(3000);
+
+
+  // Restart takes quite some time
+  // To skip it, call init() instead of restart()
+  SerialMon.println("Initializing modem...");
+  modem.restart();
+
+  String modemInfo = modem.getModemInfo();
+  SerialMon.print("Modem: ");
+  SerialMon.println(modemInfo);
+
+/*      RE SIM MIGHT NEED IF NEXT SIM UNLOCK WONT WORK!
+ * // Unlock your SIM card with a PIN if needed
+  if (strlen(simPIN) && modem.getSimStatus() != 3 ) {
+    modem.simUnlock(simPIN);
+  }
+   * */
+   
+  // Unlock your SIM card with a PIN
+  //modem.simUnlock("");
+
+  SerialMon.print("Waiting for network...");
+  if (!modem.waitForNetwork()) {
+    SerialMon.println(" fail");
+    while (true);
+  }
+  SerialMon.println(" OK");
+
+  SerialMon.print("Connecting to ");
+  SerialMon.print(apn);
+  if (!modem.gprsConnect(apn, user, pass)) {
+    SerialMon.println(" fail");
+    while (true);
+  }
+  SerialMon.println(" OK");
+}
+
+// ################# END OF SETUP ROUTINE ###################
+
+void gsmConnect() {
+  String modemInfo = modem.getModemInfo();
+  SerialMon.print("Modem: ");
+  SerialMon.println(modemInfo);
+
+  // Unlock your SIM card with a PIN
+  //modem.simUnlock("");
+
+  SerialMon.print("Waiting for network...");
+  if (!modem.waitForNetwork()) {
+    SerialMon.println(" fail");
+    while (true);
+  }
+  SerialMon.println(" OK");
+
+  SerialMon.print("Connecting to ");
+  SerialMon.print(apn);
+  if (!modem.gprsConnect(apn, user, pass)) {
+    SerialMon.println(" fail");
+    while (true);
+  }
+  SerialMon.println(" OK");
+}
+
+boolean mqttConnect() {
+  // MQTT Broker setup
+  mqtt.setServer(broker, 8883); // Secure (SSL) Port - unlike port 1883
+  mqtt.setCallback(mqttCallback);
+
+  SerialMon.print("Connecting to ");
+  SerialMon.print(broker);
+
+  // Connect to MQTT Broker
+  boolean status = mqtt.connect(CLIENT_ID, ADAFRUIT_USERNAME, AIO_KEY);
+
+  if (status == false) {
+    SerialMon.println(" fail");
+    return false;
+  }
+  SerialMon.println(" Connected to MQTT Broker OK");
+  mqtt.subscribe(SUBSCRIBE_FEED_PATH);
+  return mqtt.connected();
+}
+
+void loop() {
+
+  //digitalWrite(LED_PIN, HIGH);
+  
+  if(!modem.isNetworkConnected()){
+    SerialMon.println("no GSM");
+    gsmConnect();
+  } else {
+    if (mqtt.connected()) {
+    mqtt.loop();
+  } else {
+    // Reconnect every 10 seconds
+    SerialMon.println("Else in LOOP");
+    unsigned long t = millis();
+    if (t - lastReconnectAttempt > 10000L) {
+      lastReconnectAttempt = t;
+      if (mqttConnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  }
+ }
+}
